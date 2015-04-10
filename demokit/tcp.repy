@@ -1,0 +1,216 @@
+# send a probe message to each neighbor
+def probe_neighbors(port):
+  ip = getmyip() 
+
+  for sourceip in mycontext["forward"].keys(): 
+    for a, b in mycontext["pairs"]:
+      if a != ip and b != ip:
+        continue
+      dest = a
+      if a == ip:
+        dest = b
+      try:
+        socket = openconn(dest, port)
+        if mycontext["forward"][sourceip] < 100:
+          ttl = mycontext["forward"][sourceip]
+          socket.send("ROUTING " + str(sourceip) + " " + str(ttl) + ";\n\n")
+          sleep(.1)
+      except Exception, e:
+        pass
+      sleep(.1)
+    mycontext["forward"][sourceip] = 100
+
+  for a, b in mycontext["pairs"]:
+    if a != ip and b != ip:
+      continue
+    dest = a
+    if a == ip:
+      dest = b
+    try:
+      socket = openconn(dest, port)
+      if mycontext["announce"] > 0:
+        socket.send("ROUTING " + str(ip) + " 1;\n\n")
+      mycontext['connected_src'][dest] = True
+
+    except Exception, e:
+      pass
+    sleep(.1)
+  
+    for neighborip in mycontext["nodes"]:
+      if dest in mycontext['connected_dest']:
+        sendmess(neighborip, port, 'established_dest '+ ip + " " + dest)
+        sleep(.1)
+      
+  for neighborip in mycontext["nodes"]:
+    for node2 in mycontext["nodes"]:
+      sendmess(neighborip, port, 'dist ' + node2 + ' ' + str(mycontext['dist'][ip][node2]))
+
+  mycontext["announce"] -= 1
+  
+  while True:
+    try:
+      settimer(0.5, probe_neighbors, (port, ))
+      return
+    except Exception, e:
+      if "Resource 'events'" in str(e):
+        # there are too many events scheduled, I should wait and try again
+        sleep(.5)
+        continue
+      raise
+ 
+
+# Handle an incoming message
+def got_message(srcip, srcport, mess, ch):
+  ips = []
+  if mess.find("established") > -1:
+    if mess.find("established_src ") > -1:
+      ips = mess[len("established_src "):].split(" ")
+    if mess.find("established_dest ") > -1:
+      ips = mess[len("established_dest "):].split(" ")
+    if ips[0] not in mycontext['connected']:
+      mycontext['connected'][ips[0]] = {}
+    mycontext['connected'][ips[0]][ips[1]] = True
+    if ips[1] not in mycontext['connected']:
+      mycontext['connected'][ips[1]] = {}
+    mycontext['connected'][ips[1]][ips[0]] = True
+  if mess.find("dist ") > -1:
+    data = mess[len("dist "):].split(" ")
+    if int(data[1]) < mycontext['dist'][srcip][data[0]]:
+      mycontext['dist'][srcip][data[0]] = int(data[1])
+      mycontext['dist'][data[0]][srcip] = int(data[1])
+      mycontext['whom'][srcip][data[0]] = str(srcip)
+      mycontext['whom'][data[0]][srcip] = str(srcip)
+
+
+def generate_status_page():
+  ip = getmyip() 
+  webpage = '<html><body><h1>TCP connections</h1><table border="1">'
+  webpage = webpage + "<tr><td></td><td>" + "</td><td>".join(mycontext['nodes'])+"</td></tr>"
+  for node1 in mycontext['nodes']:
+    webpage += '<tr><td>' + node1 
+    webpage += "</td>"
+    for node2 in mycontext['nodes']:
+      found = False
+      connected = False
+      if (node1 in mycontext['connected'] and node2 in mycontext['connected'][node1]) or \
+         (node2 in mycontext['connected'] and node1 in mycontext['connected'][node2]):
+        connected = True
+      for a, b in mycontext['pairs']:
+        if (node1 == a and node2 == b) or (node1 == b and node2 == a):
+          found = True
+      webpage += "<td>"
+      if found:
+        webpage += "Linked </br>"
+      if connected:
+        webpage += "TCP connection established </br>"
+      webpage += "Distance " + str(mycontext["dist"][node1][node2]) + "</br>"
+      webpage += "Intermediate node: " + str(mycontext["whom"][node1][node2])
+
+      webpage += "</td>" 
+    webpage += '</tr>'
+
+    webpage += '</tr>'
+  webpage += '</table>'
+  webpage += "<h1> To be forwarded</h1></br>"
+
+  for sourceip in mycontext["forward"].keys():
+    ttl = mycontext["forward"][sourceip]
+    webpage += sourceip + " distance " + str(ttl) + "</br>"  
+  webpage += '</html>'
+  return webpage
+
+
+def handle_http_request(srcip, srcport, connobj, ch, mainch):
+  ip = getmyip() 
+  try:
+    total_data = ''
+    new_data = ''
+    while '\n\n' not in new_data:
+      data = connobj.recv(4096)
+      new_data = data.replace('\r\n', '\n')
+      total_data += new_data
+    header, overflow = total_data.split('\n\n', 1)
+    if total_data.find("ROUTING ") > -1:
+      data = total_data[total_data.find("ROUTING "):]
+      data = data[len("ROUTING "):]
+      data = data[:data.find(";")].split(" ")
+      sourceip = data[0]
+      ttl = int(data[1])
+      mycontext['connected_dest'][srcip] = True
+      if ttl < mycontext["dist"][sourceip][ip]:
+        mycontext["dist"][sourceip][ip] = ttl
+        mycontext["dist"][ip][sourceip] = ttl
+        mycontext["whom"][sourceip][ip] = str(srcip)
+        mycontext["whom"][ip][sourceip] = str(srcip)
+      if ttl < 10: 
+        ttl += 1
+        if sourceip in mycontext['forward']:
+          mycontext['forward'][sourceip] = min(mycontext['forward'][sourceip], ttl)
+        else:
+          mycontext['forward'][sourceip] = ttl
+
+      data = 'HTTP/1.1 200 OK\nContent-Type: text/html\nContent-Length: 5\nServer: Seattle Testbed\n\n blaaa'
+      try:
+        sent = 0
+        while sent < len(data):
+          sent += connobj.send(data[sent:])
+        connobj.close()
+      except Exception, e:
+        if "Socket closed" in str(e):
+          return
+        raise
+      return
+  except Exception, e:
+    if "Socket closed" in str(e):
+      return
+    raise
+  everything_after_httpaction = header.split(None, 1)[1]
+  request_path = everything_after_httpaction.split(" HTTP/")[0]
+  if request_path != '/':
+    data = 'HTTP/1.1 404 Not Found\n\n'
+  else:
+    webpage = generate_status_page()
+    data = 'HTTP/1.1 200 OK\nContent-Type: text/html\nContent-Length: '+str(len(webpage))+'\nServer: Seattle Testbed\n\n'+webpage
+  try:
+    sent = 0
+    while sent < len(data):
+      sent += connobj.send(data[sent:])
+    connobj.close()
+  except Exception, e:
+    if "Socket closed" in str(e):
+      return
+    raise
+
+
+
+if callfunc == 'initialize':
+  mycontext['connected_src'] = {}
+  mycontext['connected_dest'] = {}
+  mycontext['forward'] = {}
+  mycontext['connected'] = {}
+  mycontext["dist"] = {}
+  mycontext["whom"] = {}
+  mycontext["announce"] = 3
+  mycontext['pairs'] = [("128.36.233.154", "203.178.143.28"), ("128.36.233.154", "204.85.191.10"), ("128.36.233.154", "206.207.248.35"), ("130.195.4.68", "128.36.233.154"), ("130.195.4.68", "194.29.178.5"), ("130.195.4.68", "203.178.133.11"), ("130.195.4.68", "206.207.248.35"), ("165.242.90.129", "203.178.143.28"), ("194.29.178.5", "165.242.90.129"), ("203.178.133.11", "194.29.178.5"), ("203.178.143.28", "206.23.240.28"), ("204.85.191.10", "130.195.4.68"), ("206.23.240.28", "204.85.191.10")]
+
+  mycontext['nodes'] = ["203.178.143.28", "206.23.240.28", "194.29.178.5", "206.207.248.35", "203.178.133.11", "204.85.191.10", "128.36.233.154", "165.242.90.129", "130.195.4.68"]
+  for node1 in mycontext["nodes"]:
+    mycontext["dist"][node1] = {}
+    mycontext["whom"][node1] = {}
+    for node2 in mycontext["nodes"]:
+      mycontext["whom"][node1][node2] = "None"
+      if node1 == node2:
+        mycontext["dist"][node1][node2] = 0
+      else:
+        mycontext["dist"][node1][node2] = 100
+
+  ip = getmyip() 
+  if len(callargs) != 1:
+    raise Exception, "Must specify the port to use"
+  port = int(callargs[0])
+
+  recvmess(ip, port, got_message)  
+  waitforconn(ip, port, handle_http_request)
+  probe_neighbors(port)
+
+
