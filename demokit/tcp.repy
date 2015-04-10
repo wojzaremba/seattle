@@ -13,7 +13,8 @@ def probe_neighbors(port):
         socket = openconn(dest, port)
         if mycontext["forward"][sourceip] < 100:
           ttl = mycontext["forward"][sourceip]
-          socket.send("ROUTING " + str(sourceip) + " " + str(ttl) + ";\n\n")
+          time = mycontext["forward_time"][sourceip]
+          socket.send("ROUTING " + str(sourceip) + " " + str(ttl) + " " + str(time) + ";\n\n")
           sleep(.1)
       except Exception, e:
         pass
@@ -29,7 +30,7 @@ def probe_neighbors(port):
     try:
       socket = openconn(dest, port)
       if mycontext["announce"] > 0:
-        socket.send("ROUTING " + str(ip) + " 1;\n\n")
+        socket.send("ROUTING " + str(ip) + " 1 " + str(getruntime()) + ";\n\n")
       mycontext['connected_src'][dest] = True
 
     except Exception, e:
@@ -44,6 +45,7 @@ def probe_neighbors(port):
   for neighborip in mycontext["nodes"]:
     for node2 in mycontext["nodes"]:
       sendmess(neighborip, port, 'dist ' + node2 + ' ' + str(mycontext['dist'][ip][node2]))
+      sendmess(neighborip, port, 'time ' + node2 + ' ' + str(mycontext['time'][ip][node2]))
 
   mycontext["announce"] -= 1
   
@@ -78,7 +80,13 @@ def got_message(srcip, srcport, mess, ch):
     if int(data[1]) < mycontext['dist'][srcip][data[0]]:
       mycontext['dist'][srcip][data[0]] = int(data[1])
       mycontext['dist'][data[0]][srcip] = int(data[1])
-      mycontext['whom'][srcip][data[0]] = str(srcip)
+
+  if mess.find("time ") > -1:
+    data = mess[len("time "):].split(" ")
+    if float(data[1]) < mycontext['time'][srcip][data[0]]:
+      mycontext['time'][srcip][data[0]] = float(data[1])
+      mycontext['time'][data[0]][srcip] = float(data[1])
+      mycontext['whom'][srcip][data[0]] = str(data[0])
       mycontext['whom'][data[0]][srcip] = str(srcip)
 
 
@@ -103,7 +111,7 @@ def generate_status_page():
         webpage += "Linked </br>"
       if connected:
         webpage += "TCP connection established </br>"
-      webpage += "Distance " + str(mycontext["dist"][node1][node2]) + "</br>"
+      webpage += "Distance by time " + str(mycontext["time"][node1][node2]) + "</br>"
       webpage += "Intermediate node: " + str(mycontext["whom"][node1][node2])
 
       webpage += "</td>" 
@@ -136,18 +144,24 @@ def handle_http_request(srcip, srcport, connobj, ch, mainch):
       data = data[:data.find(";")].split(" ")
       sourceip = data[0]
       ttl = int(data[1])
+      sendtime = float(data[2])
+      time = getruntime() - sendtime
       mycontext['connected_dest'][srcip] = True
-      if ttl < mycontext["dist"][sourceip][ip]:
+      if time < mycontext["time"][sourceip][ip] and time > 0:
         mycontext["dist"][sourceip][ip] = ttl
         mycontext["dist"][ip][sourceip] = ttl
-        mycontext["whom"][sourceip][ip] = str(srcip)
-        mycontext["whom"][ip][sourceip] = str(srcip)
+        mycontext["time"][sourceip][ip] = time
+        mycontext["time"][ip][sourceip] = time
+        mycontext["whom"][sourceip][ip] = str(ip)
+        mycontext["whom"][ip][sourceip] = str(sourceip)
       if ttl < 10: 
         ttl += 1
         if sourceip in mycontext['forward']:
           mycontext['forward'][sourceip] = min(mycontext['forward'][sourceip], ttl)
+          mycontext['forward_time'][sourceip] = min(mycontext['forward_time'][sourceip], sendtime)
         else:
           mycontext['forward'][sourceip] = ttl
+          mycontext['forward_time'][sourceip] = sendtime
 
       data = 'HTTP/1.1 200 OK\nContent-Type: text/html\nContent-Length: 5\nServer: Seattle Testbed\n\n blaaa'
       try:
@@ -187,8 +201,10 @@ if callfunc == 'initialize':
   mycontext['connected_src'] = {}
   mycontext['connected_dest'] = {}
   mycontext['forward'] = {}
+  mycontext['forward_time'] = {}
   mycontext['connected'] = {}
   mycontext["dist"] = {}
+  mycontext["time"] = {}
   mycontext["whom"] = {}
   mycontext["announce"] = 3
   mycontext['pairs'] = [("128.36.233.154", "203.178.143.28"), ("128.36.233.154", "204.85.191.10"), ("128.36.233.154", "206.207.248.35"), ("130.195.4.68", "128.36.233.154"), ("130.195.4.68", "194.29.178.5"), ("130.195.4.68", "203.178.133.11"), ("130.195.4.68", "206.207.248.35"), ("165.242.90.129", "203.178.143.28"), ("194.29.178.5", "165.242.90.129"), ("203.178.133.11", "194.29.178.5"), ("203.178.143.28", "206.23.240.28"), ("204.85.191.10", "130.195.4.68"), ("206.23.240.28", "204.85.191.10")]
@@ -196,13 +212,16 @@ if callfunc == 'initialize':
   mycontext['nodes'] = ["203.178.143.28", "206.23.240.28", "194.29.178.5", "206.207.248.35", "203.178.133.11", "204.85.191.10", "128.36.233.154", "165.242.90.129", "130.195.4.68"]
   for node1 in mycontext["nodes"]:
     mycontext["dist"][node1] = {}
+    mycontext["time"][node1] = {}
     mycontext["whom"][node1] = {}
     for node2 in mycontext["nodes"]:
       mycontext["whom"][node1][node2] = "None"
       if node1 == node2:
         mycontext["dist"][node1][node2] = 0
+        mycontext["time"][node1][node2] = 0
       else:
         mycontext["dist"][node1][node2] = 100
+        mycontext["time"][node1][node2] = 100000
 
   ip = getmyip() 
   if len(callargs) != 1:
